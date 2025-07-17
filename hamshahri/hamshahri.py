@@ -1,6 +1,7 @@
 from hazm import *
 import os
 import json
+import math
 def persian_text_proccess(f:str):
     # خواندن داکیومنت
     #f=open(file_name,'r',encoding="utf8").read()
@@ -42,6 +43,31 @@ def persian_text_proccess(f:str):
 
     return lm_tokens
 
+def evaluate_search(retrieved_docs, query, queries_file="queries.json"):
+    with open(queries_file, "r", encoding="utf-8") as f:
+        queries = json.load(f)
+    relevant_docs = set(queries.get(query, []))
+    retrieved_set = set(retrieved_docs)
+    # Precision, Recall, F-measure
+    true_positives = len(retrieved_set & relevant_docs)
+    precision = true_positives / len(retrieved_set) if retrieved_set else 0
+    recall = true_positives / len(relevant_docs) if relevant_docs else 0
+    if precision + recall == 0:
+        f_measure = 0
+    else:
+        f_measure = 2 * precision * recall / (precision + recall)
+    # MAP
+    ap_sum = 0
+    num_rel = 0
+    for i, doc_id in enumerate(retrieved_docs, 1):
+        if doc_id in relevant_docs:
+            num_rel += 1
+            ap_sum += num_rel / i
+    map_score = ap_sum / len(relevant_docs) if relevant_docs else 0
+    print(f"Precision: {precision:.3f}")
+    print(f"Recall: {recall:.3f}")
+    print(f"F-measure: {f_measure:.3f}")
+    print(f"MAP: {map_score:.3f}")
 
 hamshahri=HamshahriReader(root="HAM2")
 docs=hamshahri.docs()
@@ -61,6 +87,7 @@ while inp!=0 :
     print("8 - save posting to file")
     print("9 - load posting from file")
     print("10 - compressions ")
+    print("11 - search")
     print("0 - Exit")
     inp=int(input())
     if inp==0 :
@@ -81,6 +108,7 @@ while inp!=0 :
     elif inp==6:
         while ham!="end":
             proccesed=persian_text_proccess(ham["text"])
+            proccesed_texts[ham["id"]]= proccesed
             for i in proccesed:
                 if i not in indexed:
                     indexed[i]=[ham["id"]]
@@ -89,7 +117,6 @@ while inp!=0 :
             ham=next(docs,"end")
         print(indexed)
         posting=indexed
-        ham=next(docs)
     elif inp==7 :
             counter=0
             blocks=[]
@@ -127,12 +154,18 @@ while inp!=0 :
         with open("posting.json", "w", encoding="utf-8") as f:
             json.dump(posting, f, ensure_ascii=False, indent=2)
         print("Posting saved to posting.json")
+        with open("processed.json", "w", encoding="utf-8") as f:
+            json.dump(proccesed_texts, f, ensure_ascii=False, indent=2)
+        print("Processed texts saved to processed.json")
 
     elif inp==9:
         with open("posting.json", "r", encoding="utf-8") as f:
             posting = json.load(f)
         print("Posting loaded from posting.json")
         print(posting)
+        with open("processed.json", "r", encoding="utf-8") as f:
+            proccesed_texts = json.load(f)
+        print("Processed texts loaded from processed.json")
     elif inp==10:
         os.system("cls" if os.name == 'nt' else 'clear')
         print("chose method of compression:")
@@ -288,6 +321,92 @@ while inp!=0 :
             print("Variable byte compression saved to vb_compression.json")
         else:
             print("Wrong input! Try again :)")
+
+    elif inp==11:
+        os.system("cls" if os.name == 'nt' else 'clear')
+        print("chose method of search :")
+        print("1 - TF-IDF")
+        print("2 - Pharasal Search")
+        inp3=int(input())
+        if inp3==1:
+            def compute_tf(term, doc_tokens):
+                return doc_tokens.count(term) / len(doc_tokens) if len(doc_tokens) > 0 else 0
+
+            def compute_idf(term, all_docs):
+                N = len(all_docs)
+                df = sum(1 for tokens in all_docs.values() if term in tokens)
+                return math.log((N + 1) / (df + 1)) + 1  # smoothed idf
+
+            query = input("Enter your query: ")
+            query_tokens = persian_text_proccess(query)
+
+            # Check if any document contains at least one query token
+            found = False
+            scores = {}
+            for doc_id, tokens in proccesed_texts.items():
+                score = 0
+                for term in query_tokens:
+                    tf = compute_tf(term, tokens)
+                    idf = compute_idf(term, proccesed_texts)
+                    score += tf * idf
+                if score > 0:
+                    scores[doc_id] = score
+                    found = True
+
+            # Sort and show results
+            sorted_docs = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+            if not found:
+                print("No relevant documents found.")
+                print("Debug info:")
+                print("Query tokens:", query_tokens)
+                print("Sample doc tokens:", list(proccesed_texts.items())[:1])
+            else:
+                print("Top relevant documents:")
+                #only show top 10 
+                for doc_id, score in sorted_docs[:10]:
+                    print(f"DocID: {doc_id}, Score: {score:.4f}")
+                # Evaluate
+                retrieved_doc_ids = [doc_id for doc_id, score in sorted_docs[:10]]
+                evaluate_search(retrieved_doc_ids, query)
+
+        elif inp3==2:
+            query = input("input your query: ")
+            import re
+            # Extract phrases in quotes and single words
+            phrases = re.findall(r'"([^"]+)"', query)
+            query_wo_phrases = re.sub(r'"[^"]+"', '', query)
+            single_terms = persian_text_proccess(query_wo_phrases)
+            phrase_tokens = [persian_text_proccess(p) for p in phrases]
+
+            found_docs = []
+            for doc_id, tokens in proccesed_texts.items():
+                # Check all single terms are present (anywhere)
+                if not all(term in tokens for term in single_terms):
+                    continue
+                # Check all phrases are present (in order, consecutive)
+                phrase_found = True
+                for p_tokens in phrase_tokens:
+                    found = False
+                    for i in range(len(tokens) - len(p_tokens) + 1):
+                        if tokens[i:i+len(p_tokens)] == p_tokens:
+                            found = True
+                            break
+                    if not found:
+                        phrase_found = False
+                        break
+                if phrase_found:
+                    found_docs.append(doc_id)
+
+            if not found_docs:
+                print("no result")
+                print("Debug info:")
+                print("Query tokens:", single_terms, "Phrases:", phrase_tokens)
+            else:
+                print("retrived documents:")
+                for doc_id in found_docs:
+                    print(f"DocID: {doc_id}")
+                # Evaluate
+                evaluate_search(found_docs, query)
     else :
         print("Wrong input! Try again :)")
 
